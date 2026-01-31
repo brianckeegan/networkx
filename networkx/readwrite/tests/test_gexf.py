@@ -1,10 +1,61 @@
 import io
 import time
 
+from io import BytesIO
+import xml.etree.ElementTree as ET
 import pytest
 
 import networkx as nx
 
+def _color_element(xml_bytes, ns_viz):
+    root = ET.fromstring(xml_bytes)
+    return root.find(f".//{{{ns_viz}}}color")
+
+def _gexf_bytes(G, version):
+    return ("\n".join(nx.generate_gexf(G, version=version))).encode("utf-8")
+
+def test_gexf_writer_viz_color_hex_v13():
+    G = nx.Graph()
+    G.add_node(1, viz={"color": {"hex": "#FF7700", "alpha": 0.5}})
+    xmlb = _gexf_bytes(G, "1.3")
+    el = _color_element(xmlb, "http://gexf.net/1.3/viz")
+    assert el is not None
+    assert el.get("hex") == "#FF7700"
+    assert el.get("alpha") == "0.5"
+    assert el.get("r") is None
+    assert el.get("g") is None
+    assert el.get("b") is None
+
+def test_gexf_writer_viz_color_hex_fallback_v12():
+    G = nx.Graph()
+    G.add_node(1, viz={"color": {"hex": "FF7700", "a": 0.5}})
+    xmlb = _gexf_bytes(G, "1.2draft")
+    el = _color_element(xmlb, "http://www.gexf.net/1.2draft/viz")
+    assert el is not None
+    assert el.get("r") == "255"
+    assert el.get("g") == "119"
+    assert el.get("b") == "0"
+    assert el.get("a") == "0.5"
+    assert el.get("hex") is None
+
+def test_gexf_reader_viz_color_hex_v13_roundtrip():
+    G = nx.Graph()
+    G.add_node(1, viz={"color": {"hex": "#FF7700", "alpha": 0.5}})
+    bio = BytesIO()
+    nx.write_gexf(G, bio, version="1.3")
+    bio.seek(0)
+    H = nx.read_gexf(bio, version="1.3")
+    # read_gexf uses string ids by default
+    c = H.nodes["1"]["viz"]["color"]
+    assert c["hex"] == "#FF7700"
+    assert c["r"] == 255 and c["g"] == 119 and c["b"] == 0
+    assert c["a"] == 0.5
+
+def test_gexf_writer_viz_color_invalid_raises():
+    G = nx.Graph()
+    G.add_node(1, viz={"color": {"hex": "ZZZZZZ"}})
+    with pytest.raises(nx.NetworkXError):
+        _ = _gexf_bytes(G, "1.3")
 
 def test_gexf_v1_3(tmp_path):
     """'Basic graph' example from https://gexf.net/schema.html"""
