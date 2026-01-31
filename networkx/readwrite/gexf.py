@@ -18,6 +18,7 @@ specification and http://gexf.net/basic.html for examples.
 """
 
 import itertools
+import string
 import time
 from xml.etree.ElementTree import (
     Element,
@@ -32,6 +33,23 @@ from networkx.utils import open_file
 
 __all__ = ["write_gexf", "read_gexf", "relabel_gexf_graph", "generate_gexf"]
 
+_HEXDIGITS = set(string.hexdigits)
+
+def _normalize_hex_color(value):
+    if not isinstance(value, str):
+        raise nx.NetworkXError("'viz' color hex value must be a string")
+    s = value.strip()
+    if s.startswith("#"):
+        s = s[1:]
+    if len(s) == 3:
+        s = "".join(ch * 2 for ch in s)
+    if len(s) != 6 or any(ch not in _HEXDIGITS for ch in s):
+        raise nx.NetworkXError(f"Invalid viz color hex value: {value!r}")
+    return "#" + s.upper()
+
+def _hex_to_rgb(value):
+    h = _normalize_hex_color(value)[1:]
+    return int(h[0:2], 16), int(h[2:4],
 
 @open_file(1, mode="wb")
 def write_gexf(G, path, encoding="utf-8", prettyprint=True, version="1.2draft"):
@@ -74,7 +92,10 @@ def write_gexf(G, path, encoding="utf-8", prettyprint=True, version="1.2draft"):
     # visualization data
     >>> G.nodes[0]["viz"] = {"size": 54}
     >>> G.nodes[0]["viz"]["position"] = {"x": 0, "y": 1}
-    >>> G.nodes[0]["viz"]["color"] = {"r": 0, "g": 0, "b": 256}
+    >>> G.nodes[0]["viz"]["color"] = {"r": 0, "g": 0, "b": 255}
+    >>> # hex color support in GEXF 1.
+    >>> G.nodes[0]["viz"]["color"] = {"hex": "#FF7700", "alpha": 0.5}
+    >>> nx.write_gexf(G, "test.gexf", version="1.3")
 
 
     Notes
@@ -577,19 +598,48 @@ class GEXFWriter(GEXF):
         if viz:
             color = viz.get("color")
             if color is not None:
+                # Accept dict or hex string
+            if isinstance(color, str):
+                color = {"hex": color}
+            if not isinstance(color, dict):
+                raise nx.NetworkXError("viz color must be a dict or a hex string")
+
+            hex_value = color.get("hex")
+            if hex_value is not None:
+                hex_value = _normalize_hex_color(hex_value)
+                alpha_in = color.get("alpha", color.get("a", None))
+
+                # GEXF 1.3 supports the hex attribute on viz:color
+                if self.version == "1.3":
+                    attrib = {"hex": hex_value}
+                    if alpha_in is not None:
+                        attrib["alpha"] = str(alpha_in)
+                    e = Element(f"{{{self.NS_VIZ}}}color", **attrib)
+                else:
+                    # Older versions: write RGB(A) derived from hex
+                    r, g, b = _hex_to_rgb(hex_value)
+                    attrib = {"r": str(r), "g": str(g), "b": str(b)}
+                    if self.VERSION != "1.1":
+                        attrib["a"] = str(alpha_in if alpha_in is not None else 1.0)
+                    e = Element(f"{{{self.NS_VIZ}}}color", **attrib)
+            else:
+                r = color.get("r")
+                g = color.get("g")
+                b = color.get("b")
+                if r is None or g is None or b is None:
+                    raise nx.NetworkXError(
+                        "viz color requires r, g, b or a hex value"
+                    )
                 if self.VERSION == "1.1":
                     e = Element(
-                        f"{{{self.NS_VIZ}}}color",
-                        r=str(color.get("r")),
-                        g=str(color.get("g")),
-                        b=str(color.get("b")),
+                        f"{{{self.NS_VIZ}}}color", r=str(r), g=str(g), b=str(b)
                     )
                 else:
                     e = Element(
                         f"{{{self.NS_VIZ}}}color",
-                        r=str(color.get("r")),
-                        g=str(color.get("g")),
-                        b=str(color.get("b")),
+                        r=str(r),
+                        g=str(g),
+                        b=str(b),
                         a=str(color.get("a", 1.0)),
                     )
                 element.append(e)
@@ -857,20 +907,35 @@ class GEXFReader(GEXF):
         viz = {}
         color = node_xml.find(f"{{{self.NS_VIZ}}}color")
         if color is not None:
-            if self.VERSION == "1.1":
-                viz["color"] = {
-                    "r": int(color.get("r")),
-                    "g": int(color.get("g")),
-                    "b": int(color.get("b")),
-                }
+            hex_attr = color.get("hex")
+            if hex_attr is not None:
+                hex_norm = _normalize_hex_color(hex_attr)
+                r, g, b = _hex_to_rgb(hex_norm)
+                alpha_attr = color.get("alpha", color.get("a", None))
+                if self.VERSION == "1.1":
+                    viz["color"] = {"hex": hex_norm, "r": r, "g": g, "b": b}
+                else:
+                    viz["color"] = {
+                        "hex": hex_norm,
+                        "r": r,
+                        "g": g,
+                        "b": b,
+                        "a": float(alpha_attr) if alpha_attr is not None else 1.0,
+                    }
             else:
-                viz["color"] = {
-                    "r": int(color.get("r")),
-                    "g": int(color.get("g")),
-                    "b": int(color.get("b")),
-                    "a": float(color.get("a", 1)),
-                }
-
+                if self.VERSION == "1.1":
+                    viz["color"] = {
+                        "r": int(color.get("r")),
+                        "g": int(color.get("g")),
+                        "b": int(color.get("b")),
+                    }
+                else:
+                    viz["color"] = {
+                        "r": int(color.get("r")),
+                        "g": int(color.get("g")),
+                        "b": int(color.get("b")),
+                        "a": float(color.get("a", 1.0)),
+                    }
         size = node_xml.find(f"{{{self.NS_VIZ}}}size")
         if size is not None:
             viz["size"] = float(size.get("value"))
